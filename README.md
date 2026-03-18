@@ -1,0 +1,22 @@
+AI_Vishing_detector
+
+🎤 AI Voice Phishing Detector — Detect and analyze potential vishing (voice phishing) calls using AI-based audio analysis. 
+This tool allows users to upload audio files, detect suspicious or high-risk calls, extract keywords, determine the language and report spam numbers safely.
+
+Features :
+
+AI-Based Risk Analysis: Detect if an uploaded call is safe, suspicious, or high-risk.
+Audio File Upload: Supports .wav and .mp3 files.
+Transcript Generation: View transcribed text of the audio.
+Keyword Extraction: Detect important words commonly used in phishing calls.
+Language Detection: Identify the language of the caller.
+Spam Number Reporting: Report phone numbers involved in vishing attempts.
+Streamlit Web Interface: Interactive and user-friendly dashboard.
+
+Tech Stack :
+
+Frontend & UI: Streamlit
+Backend API: FastAPI
+Database: SQLite (for storing reported numbers)
+Audio Processing: Python libraries (e.g., pydub, speech_recognition)
+Machine Learning / AI: Pretrained models to detect human vs AI-generated voice.
