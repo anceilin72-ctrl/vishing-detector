@@ -1,0 +1,9 @@
+streamlit
+fastapi
+uvicorn
+librosa
+numpy
+pandas
+scikit-learn
+soundfile
+langdetect

@@ -1,0 +1,7 @@
+import os
+
+# Make sure the folder exists
+os.makedirs('models', exist_ok=True)
+
+# Save the model
+model.save('models/human_vs_ai_model.h5')
