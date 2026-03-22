@@ -1,13 +1,9 @@
 from fastapi import FastAPI, UploadFile, File
-import shutil
-import sys
-import os
-import time
+import sys, os, time
+import concurrent.futures as cf
 
-# Fix module path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Imports
 from utils.preprocess import load_audio, normalize_audio
 from utils.feature_extraction import extract_features
 from utils.speech_to_text import speech_to_text
@@ -15,102 +11,119 @@ from utils.language_detect import detect_language
 from utils.keyword_detection import detect_keywords
 from utils.risk_scoring import calculate_risk
 from models.dummy_model import predict_audio, predict_text
-
-# ✅ NEW: Voice authenticity
 from models.voice_authenticity import detect_voice_authenticity
+from voice_detector import detect_voice_type
 
 app = FastAPI()
 
+# Whisper language code → display name
+WHISPER_LANG_MAP = {
+    "ta": "Tamil",
+    "hi": "Hindi",
+    "en": "English",
+    "te": "Tamil",   # Whisper confuses Tamil/Telugu
+    "ml": "Tamil",   # and Malayalam
+}
+
+
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
-
+    file_path = None
     try:
         start_time = time.time()
-        print("🚀 Processing started...")
 
-        # -------------------------
-        # SAVE FILE
-        # -------------------------
-        file_path = f"temp_{file.filename}"
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # ── 1. Save file ──────────────────────────────────────────────────────
+        audio_bytes = await file.read()
+        file_path   = f"temp_{file.filename}"
+        with open(file_path, "wb") as f:
+            f.write(audio_bytes)
 
-        print("✅ File saved")
-
-        # -------------------------
-        # AUDIO PROCESSING
-        # -------------------------
+        # ── 2. Load audio once ────────────────────────────────────────────────
         y, sr = load_audio(file_path)
-        y = normalize_audio(y)
-        print("✅ Audio processed")
+        y     = normalize_audio(y)
 
-        # -------------------------
-        # FEATURE EXTRACTION
-        # -------------------------
-        features = extract_features(y, sr)
-        print("✅ Features extracted")
+        # ── 3. Run all heavy tasks in parallel ────────────────────────────────
+        def run_features():
+            feats       = extract_features(y, sr)
+            vtype, conf = detect_voice_authenticity(feats)
+            ascore      = predict_audio(feats)
+            return feats, vtype, conf, ascore
 
-        # -------------------------
-        # 🎤 VOICE AUTHENTICITY DETECTION
-        # -------------------------
-        voice_type, confidence = detect_voice_authenticity(features)
-        print("🎤 Voice Type:", voice_type)
-        print("🔍 Confidence:", confidence)
+        def run_stt():
+            try:
+                return speech_to_text(file_path).strip()
+            except Exception as e:
+                print("❌ STT:", e)
+                return ""
 
-        # -------------------------
-        # AUDIO MODEL
-        # -------------------------
-        audio_score = predict_audio(features)
-        print("🎧 Audio Score:", audio_score)
+        def run_voice_det():
+            return detect_voice_type(audio_bytes)
 
-        # -------------------------
-        # SPEECH TO TEXT
-        # -------------------------
-        try:
-            text = speech_to_text(file_path).strip()
-        except Exception as e:
-            print("❌ Speech Error:", e)
-            text = ""
+        with cf.ThreadPoolExecutor(max_workers=3) as ex:
+            f_feats   = ex.submit(run_features)
+            f_stt     = ex.submit(run_stt)
+            f_voicdet = ex.submit(run_voice_det)
 
-        print("📝 Transcribed Text:", text)
+            features, voice_type, confidence, audio_score = f_feats.result()
+            text      = f_stt.result()
+            voice_det = f_voicdet.result()
 
-        # -------------------------
-        # SAFE FALLBACKS
-        # -------------------------
-        if text == "":
-            text_score = 0
-            keywords = []
-            language = "Unknown"
-        else:
-            text_score = predict_text(text)
-            keywords = detect_keywords(text)
+        print(f"✅ Done ({round(time.time()-start_time,1)}s)")
+
+        # ── 4. Language detection ─────────────────────────────────────────────
+        # Use Whisper's audio-based language detection (most reliable)
+        # Falls back to text-based only if Whisper has low confidence
+        whisper_lang = getattr(speech_to_text, "whisper_lang", "")
+        whisper_prob = getattr(speech_to_text, "whisper_lang_prob", 0.0)
+
+        if whisper_lang and whisper_prob >= 0.20:
+            # Trust Whisper language detection from audio signal
+            language = WHISPER_LANG_MAP.get(whisper_lang, "English")
+            print(f"🌍 Language: {language} via Whisper ({whisper_prob:.0%})")
+        elif text:
+            # Fallback: detect from transcribed text
             language = detect_language(text)
+            print(f"🌍 Language: {language} via text fallback")
+        else:
+            language = "Unknown"
 
-        print("🧠 Text Score:", text_score)
-        print("🔍 Keywords:", keywords)
-        print("🌍 Language:", language)
+        # ── 5. Keywords & risk ────────────────────────────────────────────────
+        if text:
+            text_score    = predict_text(text)
+            keywords      = detect_keywords(text)
+        else:
+            text_score, keywords = 0, []
 
-        # -------------------------
-        # RISK CALCULATION
-        # -------------------------
         keyword_score = len(keywords) / 5 if keywords else 0
-        risk = calculate_risk(audio_score, text_score, keyword_score)
+        risk          = calculate_risk(audio_score, text_score, keyword_score)
 
-        print("⚠ Final Risk:", risk)
-        print("⏱ Total Time:", time.time() - start_time)
+        print(f"⚠ Risk: {risk:.1f}% | Keywords: {keywords}")
 
-        # -------------------------
-        # RESPONSE
-        # -------------------------
+        # ── 6. Cleanup ────────────────────────────────────────────────────────
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+
         return {
-            "risk_score": float(risk),
-            "language": language,
-            "keywords": keywords,
-            "text": text,
-            "voice_type": voice_type,       # ✅ added
-            "confidence": confidence        # ✅ added
+            "risk_score":    float(risk),
+            "language":      language,
+            "keywords":      keywords,
+            "voice_type":    voice_type,
+            "confidence":    confidence,
+            "ai_label":      voice_det.get("label", "Unknown"),
+            "ai_confidence": voice_det.get("confidence", 0),
+            "ai_score":      voice_det.get("ai_score", 0),
         }
 
     except Exception as e:
         print("❌ ERROR:", e)
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
         return {"error": str(e)}
+
+
+@app.post("/detect-voice-type")
+async def detect_voice_type_endpoint(file: UploadFile = File(...)):
+    try:
+        return detect_voice_type(await file.read())
+    except Exception as e:
+        return {"label": "Unknown", "confidence": 0.0, "ai_score": 0.0, "features": {}, "error": str(e)}
